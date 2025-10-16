@@ -4,12 +4,14 @@ OCRProcessor: A class-based OCR processor with searchable PDF generation
 """
 
 import os
+import tempfile
 import urllib.request
 from typing import Optional, Tuple, Dict, List, Any
 import cv2
 from PIL import Image
 from paddleocr import PaddleOCR
 from reportlab.pdfgen import canvas
+from pdf2image import convert_from_path
 
 
 class OCRProcessor:
@@ -162,87 +164,75 @@ class OCRProcessor:
                 print(f"❌ Error during OCR processing: {e}")
             return None
     
-    def create_searchable_pdf(self, 
-                            image_path: str, 
-                            ocr_result: Dict[str, Any], 
+    def create_searchable_pdf(self,
+                            image_paths: List[str],
+                            ocr_results: List[Dict[str, Any]],
                             output_pdf: str = "searchable_output.pdf") -> Optional[str]:
         """
-        Create a searchable PDF with invisible text layers.
+        Create a searchable PDF with invisible text layers from multiple pages.
         
         Args:
-            image_path (str): Path to the source image
-            ocr_result (dict): OCR results from process_image()
+            image_paths (List[str]): List of paths to the source images
+            ocr_results (List[Dict[str, Any]]): List of OCR results from process_image()
             output_pdf (str): Output PDF filename
             
         Returns:
             str: Path to the created PDF, or None if failed
         """
         try:
-            # Extract OCR data
-            rec_texts = ocr_result.get('rec_texts', [])
-            rec_scores = ocr_result.get('rec_scores', [])
-            rec_boxes = ocr_result.get('rec_boxes', [])
-            
-            if not rec_texts:
+            if not image_paths or not ocr_results:
                 if self.verbose:
-                    print("❌ No text found to create searchable PDF")
+                    print("❌ No images or OCR results to create PDF")
                 return None
-            
-            # Get image dimensions
-            image = cv2.imread(image_path)
-            if image is None:
+
+            # Get dimensions from the first image
+            first_image = cv2.imread(image_paths[0])
+            if first_image is None:
                 if self.verbose:
-                    print(f"❌ Could not read image: {image_path}")
+                    print(f"❌ Could not read image: {image_paths[0]}")
                 return None
-            
-            img_height, img_width = image.shape[:2]
-            
-            # Create PDF with 1:1 pixel mapping
+
+            img_height, img_width = first_image.shape[:2]
+
+            # Create PDF with consistent page size
             c = canvas.Canvas(output_pdf, pagesize=(img_width, img_height))
-            
-            # Add the image as background
-            c.drawImage(image_path, 0, 0, width=img_width, height=img_height)
-            
-            # Add invisible text layers
-            for i, (text, score, box) in enumerate(zip(rec_texts, rec_scores, rec_boxes), 1):
-                if not text.strip():  # Skip empty text
-                    continue
-                    
-                try:
-                    # Extract bounding box coordinates
-                    if len(box) >= 4:
-                        x1, y1, x2, y2 = box[:4]
-                    else:
-                        if self.verbose:
-                            print(f"⚠️  Invalid bounding box for text {i}: {box}")
-                        continue
-                    
-                    # Convert coordinates (flip Y-axis)
-                    pdf_x = x1
-                    pdf_y = img_height - y2
-                    
-                    # Calculate font size
-                    text_height = y2 - y1
-                    font_size = max(8, min(text_height * 0.8, 48))
-                    
-                    # Add invisible text
-                    c.setFillColorRGB(0, 0, 0, alpha=0)  # Transparent
-                    c.setFont("Helvetica", font_size)
-                    c.drawString(pdf_x, pdf_y, text)
-                    
-                except Exception as e:
+
+            for i, (image_path, ocr_result) in enumerate(zip(image_paths, ocr_results)):
+                if self.verbose:
+                    print(f"📄 Adding page {i+1} to PDF...")
+
+                # Add the image as background
+                c.drawImage(image_path, 0, 0, width=img_width, height=img_height)
+
+                # Add invisible text layers
+                if ocr_result and ocr_result.get('rec_texts'):
+                    for text, score, box in zip(ocr_result['rec_texts'], ocr_result['rec_scores'], ocr_result['rec_boxes']):
+                        if text.strip():
+                            try:
+                                x1, y1, x2, y2 = box[:4]
+                                pdf_x = x1
+                                pdf_y = img_height - y2
+                                text_height = y2 - y1
+                                font_size = max(8, min(text_height * 0.8, 48))
+                                c.setFillColorRGB(0, 0, 0, alpha=0)
+                                c.setFont("Helvetica", font_size)
+                                c.drawString(pdf_x, pdf_y, text)
+                            except Exception as e:
+                                if self.verbose:
+                                    print(f"⚠️ Error adding text '{text}': {e}")
+                else:
                     if self.verbose:
-                        print(f"⚠️  Error adding text {i} '{text}': {e}")
-                    continue
-            
-            # Save the PDF
+                        print(f"⚠️ No text found for page {i+1}")
+
+                c.showPage()
+
             c.save()
-            
+
             if self.verbose:
                 print(f"✅ Searchable PDF saved as: {output_pdf}")
-            
+
             return output_pdf
-            
+
         except Exception as e:
             if self.verbose:
                 print(f"❌ Error creating searchable PDF: {e}")
@@ -384,3 +374,96 @@ class OCRProcessor:
             results['boxed_image'] = self.draw_bounding_boxes(image_path, ocr_result, boxed_image_path)
 
         return results
+
+    def process_pdf(self, pdf_path: str, output_prefix: str, bounding_boxes: bool, dpi: int = 300) -> Optional[List[Dict[str, Any]]]:
+        """
+        Perform OCR on a PDF file.
+        
+        Args:
+            pdf_path (str): Path to the PDF file
+            output_prefix (str): Prefix for output files
+            bounding_boxes (bool): Whether to generate bounding box images
+            dpi (int): Resolution for PDF to image conversion
+            
+        Returns:
+            List[Dict[str, Any]]: A list of OCR results for each page
+        """
+        if not os.path.exists(pdf_path):
+            if self.verbose:
+                print(f"❌ PDF file not found: {pdf_path}")
+            return None
+        
+        try:
+            if self.verbose:
+                print(f"🔄 Converting PDF to images at {dpi} DPI...")
+            
+            images = convert_from_path(pdf_path, dpi=dpi)
+            
+            if not images:
+                if self.verbose:
+                    print("❌ Could not convert PDF to images")
+                return None
+            
+            if self.verbose:
+                print(f"🖼️ PDF converted to {len(images)} pages")
+            
+            all_results = []
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                image_paths = []
+                for i, image in enumerate(images):
+                    page_num = i + 1
+                    
+                    # Save the image to a temporary file
+                    temp_image_path = self.save_temp_image(image, temp_dir, page_num)
+                    image_paths.append(temp_image_path)
+                    
+                    if self.verbose:
+                        print(f"🔍 Processing page {page_num}...")
+                    
+                    # Perform OCR on the temporary image
+                    ocr_result = self.process_image(temp_image_path)
+                    
+                    if ocr_result:
+                        all_results.append(ocr_result)
+                    else:
+                        if self.verbose:
+                            print(f"⚠️ No OCR results for page {page_num}")
+                
+                if not all_results:
+                    return None
+                
+                # Generate searchable PDF
+                pdf_output_path = f"{output_prefix}_searchable.pdf"
+                self.create_searchable_pdf(image_paths, all_results, pdf_output_path)
+                
+                # Generate bounding box images
+                if bounding_boxes:
+                    for i, (res, img_path) in enumerate(zip(all_results, image_paths)):
+                        if res:
+                            page_num = i + 1
+                            box_path = f"{output_prefix}_page_{page_num}_with_boxes.jpg"
+                            self.draw_bounding_boxes(img_path, res, box_path)
+            
+            return all_results
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ Error processing PDF: {e}")
+            return None
+
+    def save_temp_image(self, image: Image.Image, temp_dir: str, page_num: int) -> str:
+        """
+        Save a PIL image to a temporary directory.
+        
+        Args:
+            image (Image.Image): The PIL image to save
+            temp_dir (str): The temporary directory path
+            page_num (int): The page number, used for the filename
+            
+        Returns:
+            str: The path to the saved temporary image
+        """
+        temp_image_path = os.path.join(temp_dir, f"page_{page_num}.png")
+        image.save(temp_image_path, "PNG")
+        return temp_image_path
