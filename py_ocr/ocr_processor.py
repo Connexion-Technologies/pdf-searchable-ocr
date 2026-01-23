@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple, Dict, List, Any
 import io
 import cv2
@@ -467,16 +468,17 @@ class OCRProcessor:
 
         return results
 
-    def process_pdf(self, pdf_path: str, output_prefix: str, bounding_boxes: bool, dpi: int = 300) -> Optional[List[Dict[str, Any]]]:
+    def process_pdf(self, pdf_path: str, output_prefix: str, bounding_boxes: bool, dpi: int = 300, workers: int = 1) -> Optional[List[Dict[str, Any]]]:
         """
         Perform OCR on a PDF file.
-        
+
         Args:
             pdf_path (str): Path to the PDF file
             output_prefix (str): Prefix for output files
             bounding_boxes (bool): Whether to generate bounding box images
             dpi (int): Resolution for PDF to image conversion
-            
+            workers (int): Number of parallel workers for OCR (default: 1)
+
         Returns:
             List[Dict[str, Any]]: A list of OCR results for each page
         """
@@ -484,54 +486,44 @@ class OCRProcessor:
             if self.verbose:
                 print(f"❌ PDF file not found: {pdf_path}")
             return None
-        
+
         try:
             if self.verbose:
                 print(f"🔄 Converting PDF to images at {dpi} DPI...")
-            
+
             images = convert_from_path(pdf_path, dpi=dpi)
-            
+
             if not images:
                 if self.verbose:
                     print("❌ Could not convert PDF to images")
                 return None
-            
+
             if self.verbose:
                 print(f"🖼️ PDF converted to {len(images)} pages")
-            
-            all_results = []
-            
+
             with tempfile.TemporaryDirectory() as temp_dir:
+                # Save all images first
                 image_paths = []
                 for i, image in enumerate(images):
                     page_num = i + 1
-                    
-                    # Save the image to a temporary file
                     temp_image_path = self.save_temp_image(image, temp_dir, page_num)
                     image_paths.append(temp_image_path)
-                    
-                    if self.verbose:
-                        print(f"🔍 Processing page {page_num}...")
-                    
-                    # Perform OCR on the temporary image
-                    ocr_result = self.process_image(temp_image_path)
 
-                    if ocr_result:
-                        all_results.append(ocr_result)
-                    else:
-                        all_results.append(None)  # Preserve alignment with image_paths
-                        if self.verbose:
-                            print(f"⚠️ No OCR results for page {page_num}")
+                # Process pages (parallel or sequential)
+                if workers > 1 and len(images) > 1:
+                    all_results = self._process_pages_parallel(image_paths, workers)
+                else:
+                    all_results = self._process_pages_sequential(image_paths)
                 
                 if not all_results or not any(all_results):
                     if self.verbose:
                         print("❌ No OCR results found in any page")
                     return None
-                
+
                 # Generate searchable PDF
                 pdf_output_path = f"{output_prefix}_searchable.pdf"
                 self.create_searchable_pdf(image_paths, all_results, pdf_output_path)
-                
+
                 # Generate bounding box images
                 if bounding_boxes:
                     for i, (img_path, res) in enumerate(zip(image_paths, all_results)):
@@ -542,13 +534,54 @@ class OCRProcessor:
                         else:
                             if self.verbose:
                                 print(f"⏭️  Skipping bounding boxes for blank page {page_num}")
-            
+
             return all_results
-            
+
         except Exception as e:
             if self.verbose:
                 print(f"❌ Error processing PDF: {e}")
             return None
+
+    def _process_pages_sequential(self, image_paths: List[str]) -> List[Optional[Dict[str, Any]]]:
+        """Process pages sequentially."""
+        all_results = []
+        for i, image_path in enumerate(image_paths):
+            page_num = i + 1
+            if self.verbose:
+                print(f"🔍 Processing page {page_num}/{len(image_paths)}...")
+            ocr_result = self.process_image(image_path)
+            if ocr_result:
+                all_results.append(ocr_result)
+            else:
+                all_results.append(None)
+                if self.verbose:
+                    print(f"⚠️ No OCR results for page {page_num}")
+        return all_results
+
+    def _process_pages_parallel(self, image_paths: List[str], workers: int) -> List[Optional[Dict[str, Any]]]:
+        """Process pages in parallel using ThreadPoolExecutor."""
+        if self.verbose:
+            print(f"⚡ Processing {len(image_paths)} pages with {workers} workers...")
+
+        # Results indexed by page number
+        results = [None] * len(image_paths)
+
+        def process_page(args):
+            idx, image_path = args
+            return idx, self.process_image(image_path)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_page, (i, path)): i for i, path in enumerate(image_paths)}
+            completed = 0
+            for future in as_completed(futures):
+                idx, ocr_result = future.result()
+                results[idx] = ocr_result
+                completed += 1
+                if self.verbose:
+                    status = "✓" if ocr_result else "⚠️ no text"
+                    print(f"🔍 Page {idx + 1}/{len(image_paths)} done ({status}) [{completed}/{len(image_paths)}]")
+
+        return results
 
     def save_temp_image(self, image: Image.Image, temp_dir: str, page_num: int) -> str:
         """

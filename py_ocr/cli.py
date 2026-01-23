@@ -40,7 +40,7 @@ def process_single_file(
     result['is_pdf'] = is_pdf
 
     if is_pdf:
-        ocr_results = ocr.process_pdf(str(input_path), output_prefix, args.boxes, args.dpi)
+        ocr_results = ocr.process_pdf(str(input_path), output_prefix, args.boxes, args.dpi, args.workers)
         if ocr_results:
             result['success'] = True
             result['page_count'] = len(ocr_results)
@@ -107,6 +107,7 @@ Examples:
     parser.add_argument("--quality", "-Q", type=int, default=95, help="JPEG quality for PDF images (1-100, default: 95)")
     parser.add_argument("--compress", "-c", choices=["screen", "ebook", "printer", "prepress"],
                         help="Ghostscript compression preset (screen=72dpi, ebook=150dpi, printer/prepress=300dpi)")
+    parser.add_argument("--workers", "-j", type=int, default=1, help="Number of parallel workers for OCR (default: 1)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose output")
     parser.add_argument("--version", action="version", version="pdf-searchable-ocr 0.1.1")
     
