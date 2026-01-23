@@ -552,7 +552,7 @@ class OCRProcessor:
 
     def save_temp_image(self, image: Image.Image, temp_dir: str, page_num: int) -> str:
         """
-        Save a PIL image to a temporary directory as JPEG for efficiency.
+        Save a PIL image to a temporary directory as PNG for lossless OCR input.
 
         Args:
             image (Image.Image): The PIL image to save
@@ -562,11 +562,8 @@ class OCRProcessor:
         Returns:
             str: The path to the saved temporary image
         """
-        temp_image_path = os.path.join(temp_dir, f"page_{page_num}.jpg")
-        # Convert RGBA to RGB if necessary (JPEG doesn't support alpha)
-        if image.mode == 'RGBA':
-            image = image.convert('RGB')
-        image.save(temp_image_path, "JPEG", quality=self.image_quality, optimize=True)
+        temp_image_path = os.path.join(temp_dir, f"page_{page_num}.png")
+        image.save(temp_image_path, "PNG")
         return temp_image_path
 
     def compress_pdf_ghostscript(self, input_pdf: str, output_pdf: str = None,
