@@ -92,7 +92,6 @@ Examples:
   pdf-searchable-ocr document.pdf --dpi 600             # Process PDF at 600 DPI
   pdf-searchable-ocr image.jpg --no-pdf --boxes         # Only generate bounding box image
   pdf-searchable-ocr image.jpg --boxes                  # Generate PDF and bounding box image
-  pdf-searchable-ocr document.pdf --reduce              # Smaller PDF output (quality=65, dpi=150)
   pdf-searchable-ocr document.pdf --quality 50          # Custom JPEG quality (1-100)
   pdf-searchable-ocr document.pdf --compress ebook      # Ghostscript compression (smallest files)
         """
@@ -105,7 +104,6 @@ Examples:
     parser.add_argument("--gpu", action="store_true", help="Use GPU acceleration (requires CUDA)")
     parser.add_argument("--no-pdf", action="store_true", help="Skip searchable PDF generation")
     parser.add_argument("--boxes", "-b", action="store_true", help="Generate bounding box visualization images")
-    parser.add_argument("--reduce", "-r", action="store_true", help="Reduce output PDF size (uses quality=65, dpi=150)")
     parser.add_argument("--quality", "-Q", type=int, default=85, help="JPEG quality for PDF images (1-100, default: 85)")
     parser.add_argument("--compress", "-c", choices=["screen", "ebook", "printer", "prepress"],
                         help="Ghostscript compression preset (screen=72dpi, ebook=150dpi, printer/prepress=300dpi)")
@@ -130,13 +128,6 @@ Examples:
     try:
         # Initialize OCR processor once for all files
         ocr = OCRProcessor(lang=args.lang, use_gpu=args.gpu, verbose=not args.quiet)
-
-        # Apply reduce mode settings (overrides quality and dpi)
-        if args.reduce:
-            args.quality = 65
-            args.dpi = 150
-            if not args.quiet:
-                print("📉 Reduce mode: Using quality=65, dpi=150 for smaller output")
 
         # Apply image quality setting
         ocr.set_image_quality(args.quality)

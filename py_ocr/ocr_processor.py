@@ -12,7 +12,6 @@ from typing import Optional, Tuple, Dict, List, Any
 import io
 import cv2
 from PIL import Image
-from paddleocr import PaddleOCR
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -71,7 +70,10 @@ class OCRProcessor:
         
         if self.verbose:
             print(f"🔧 Initializing OCR engine with language: {lang}")
-        
+
+        # Lazy import to avoid model download on CLI help
+        from paddleocr import PaddleOCR
+
         try:
             self.ocr_engine = PaddleOCR(**ocr_kwargs)
         except ValueError as e:
