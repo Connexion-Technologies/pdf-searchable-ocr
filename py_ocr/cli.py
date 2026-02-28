@@ -104,7 +104,7 @@ Examples:
     parser.add_argument("--gpu", action="store_true", help="Use GPU acceleration (requires CUDA)")
     parser.add_argument("--no-pdf", action="store_true", help="Skip searchable PDF generation")
     parser.add_argument("--boxes", "-b", action="store_true", help="Generate bounding box visualization images")
-    parser.add_argument("--quality", "-Q", type=int, default=85, help="JPEG quality for PDF images (1-100, default: 85)")
+    parser.add_argument("--quality", "-Q", type=int, default=95, help="JPEG quality for PDF images (1-100, default: 95)")
     parser.add_argument("--compress", "-c", choices=["screen", "ebook", "printer", "prepress"],
                         help="Ghostscript compression preset (screen=72dpi, ebook=150dpi, printer/prepress=300dpi)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose output")

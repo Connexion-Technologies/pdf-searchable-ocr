@@ -50,7 +50,7 @@ class OCRProcessor:
         """
         self.verbose = verbose
         self.font_path = None
-        self.image_quality = 85  # JPEG quality for PDF embedding (1-100)
+        self.image_quality = 95  # JPEG quality for PDF embedding (1-100)
         
         # Initialize PaddleOCR with safe settings
         ocr_kwargs = {
