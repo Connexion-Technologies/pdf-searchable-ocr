@@ -94,6 +94,7 @@ Examples:
   pdf-searchable-ocr image.jpg --boxes                  # Generate PDF and bounding box image
   pdf-searchable-ocr document.pdf --quality 50          # Custom JPEG quality (1-100)
   pdf-searchable-ocr document.pdf --compress ebook      # Ghostscript compression (smallest files)
+  pdf-searchable-ocr document.pdf -j 4                  # Parallel OCR with 4 workers
         """
     )
 
