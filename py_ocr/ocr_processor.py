@@ -4,12 +4,20 @@ OCRProcessor: A class-based OCR processor with searchable PDF generation
 """
 
 import os
+import shutil
+import subprocess
+import tempfile
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple, Dict, List, Any
+import io
 import cv2
 from PIL import Image
-from paddleocr import PaddleOCR
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
+from pdf2image import convert_from_path
 
 
 class OCRProcessor:
@@ -27,14 +35,14 @@ class OCRProcessor:
         verbose (bool): Whether to print verbose output
     """
     
-    def __init__(self, 
+    def __init__(self,
                  lang: str = 'en',
                  use_gpu: bool = False,
                  verbose: bool = True,
                  **kwargs):
         """
         Initialize the OCR processor.
-        
+
         Args:
             lang (str): Language for OCR recognition (default: 'en')
             use_gpu (bool): Whether to use GPU acceleration (default: False)
@@ -42,6 +50,8 @@ class OCRProcessor:
             **kwargs: Additional arguments passed to PaddleOCR
         """
         self.verbose = verbose
+        self.font_path = None
+        self.image_quality = 95  # JPEG quality for PDF embedding (1-100)
         
         # Initialize PaddleOCR with safe settings
         ocr_kwargs = {
@@ -61,7 +71,10 @@ class OCRProcessor:
         
         if self.verbose:
             print(f"🔧 Initializing OCR engine with language: {lang}")
-        
+
+        # Lazy import to avoid model download on CLI help
+        from paddleocr import PaddleOCR
+
         try:
             self.ocr_engine = PaddleOCR(**ocr_kwargs)
         except ValueError as e:
@@ -76,7 +89,65 @@ class OCRProcessor:
         
         if self.verbose:
             print("✅ OCR engine initialized successfully")
-    
+
+    def set_image_quality(self, quality: int) -> None:
+        """
+        Set the JPEG quality for PDF image embedding.
+
+        Args:
+            quality (int): JPEG quality (1-100). Higher values mean better quality but larger files.
+                          Recommended: 85 for normal, 65 for reduced size.
+        """
+        self.image_quality = max(1, min(100, quality))
+        if self.verbose:
+            print(f"📊 Image quality set to: {self.image_quality}")
+
+    def _find_font_path(self) -> Optional[str]:
+        """
+        Find a suitable CJK font from common system paths.
+
+        Returns:
+            str: Path to a valid font file, or None if not found
+        """
+        # Common font paths across different systems
+        # Prioritize TTF files as TTC files may not work with reportlab
+        font_paths = [
+            # Nanum fonts (TTF, widely compatible)
+            '/usr/share/fonts/TTF/NanumGothic.ttf',
+            '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
+            '/usr/share/fonts/nanum/NanumGothic.ttf',
+            # Noto Sans KR (single language, better compatibility)
+            '/usr/share/fonts/noto/NotoSansKR-Regular.ttf',
+            '/usr/share/fonts/TTF/NotoSansKR-Regular.ttf',
+            '/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf',
+            # Noto Sans JP
+            '/usr/share/fonts/noto/NotoSansJP-Regular.ttf',
+            '/usr/share/fonts/TTF/NotoSansJP-Regular.ttf',
+            # Noto Sans SC (Simplified Chinese)
+            '/usr/share/fonts/noto/NotoSansSC-Regular.ttf',
+            '/usr/share/fonts/TTF/NotoSansSC-Regular.ttf',
+            # DejaVu (has some CJK support)
+            '/usr/share/fonts/TTF/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            # macOS
+            '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+            '/Library/Fonts/Arial Unicode.ttf',
+            # Windows
+            'C:\\Windows\\Fonts\\msyh.ttc',  # Microsoft YaHei
+            'C:\\Windows\\Fonts\\malgun.ttf',  # Malgun Gothic
+            'C:\\Windows\\Fonts\\arial.ttf',
+        ]
+
+        for path in font_paths:
+            if os.path.exists(path):
+                if self.verbose:
+                    print(f"✅ Found font: {path}")
+                return path
+
+        if self.verbose:
+            print("⚠️ No CJK font found in common paths")
+        return None
+
     def download_sample_image(self, url: str = None, filename: str = "sample_image.jpg") -> Optional[str]:
         """
         Download a sample image for testing.
@@ -162,87 +233,99 @@ class OCRProcessor:
                 print(f"❌ Error during OCR processing: {e}")
             return None
     
-    def create_searchable_pdf(self, 
-                            image_path: str, 
-                            ocr_result: Dict[str, Any], 
+    def create_searchable_pdf(self,
+                            image_paths: List[str],
+                            ocr_results: List[Dict[str, Any]],
                             output_pdf: str = "searchable_output.pdf") -> Optional[str]:
         """
-        Create a searchable PDF with invisible text layers.
-        
+        Create a searchable PDF with invisible text layers from multiple pages.
+
         Args:
-            image_path (str): Path to the source image
-            ocr_result (dict): OCR results from process_image()
+            image_paths (List[str]): List of paths to the source images
+            ocr_results (List[Dict[str, Any]]): List of OCR results from process_image()
             output_pdf (str): Output PDF filename
-            
+
         Returns:
             str: Path to the created PDF, or None if failed
         """
         try:
-            # Extract OCR data
-            rec_texts = ocr_result.get('rec_texts', [])
-            rec_scores = ocr_result.get('rec_scores', [])
-            rec_boxes = ocr_result.get('rec_boxes', [])
-            
-            if not rec_texts:
+            if not image_paths or not ocr_results:
                 if self.verbose:
-                    print("❌ No text found to create searchable PDF")
+                    print("❌ No images or OCR results to create PDF")
                 return None
-            
-            # Get image dimensions
-            image = cv2.imread(image_path)
-            if image is None:
-                if self.verbose:
-                    print(f"❌ Could not read image: {image_path}")
-                return None
-            
-            img_height, img_width = image.shape[:2]
-            
-            # Create PDF with 1:1 pixel mapping
-            c = canvas.Canvas(output_pdf, pagesize=(img_width, img_height))
-            
-            # Add the image as background
-            c.drawImage(image_path, 0, 0, width=img_width, height=img_height)
-            
-            # Add invisible text layers
-            for i, (text, score, box) in enumerate(zip(rec_texts, rec_scores, rec_boxes), 1):
-                if not text.strip():  # Skip empty text
-                    continue
-                    
+
+            # Find and register a suitable font
+            if not self.font_path:
+                self.font_path = self._find_font_path()
+
+            font_name = "Helvetica"  # Default fallback font
+            if self.font_path:
                 try:
-                    # Extract bounding box coordinates
-                    if len(box) >= 4:
-                        x1, y1, x2, y2 = box[:4]
-                    else:
-                        if self.verbose:
-                            print(f"⚠️  Invalid bounding box for text {i}: {box}")
-                        continue
-                    
-                    # Convert coordinates (flip Y-axis)
-                    pdf_x = x1
-                    pdf_y = img_height - y2
-                    
-                    # Calculate font size
-                    text_height = y2 - y1
-                    font_size = max(8, min(text_height * 0.8, 48))
-                    
-                    # Add invisible text
-                    c.setFillColorRGB(0, 0, 0, alpha=0)  # Transparent
-                    c.setFont("Helvetica", font_size)
-                    c.drawString(pdf_x, pdf_y, text)
-                    
+                    pdfmetrics.registerFont(TTFont('CJKFont', self.font_path))
+                    font_name = 'CJKFont'
+                    if self.verbose:
+                        print(f"📝 Using font: {self.font_path}")
                 except Exception as e:
                     if self.verbose:
-                        print(f"⚠️  Error adding text {i} '{text}': {e}")
-                    continue
-            
-            # Save the PDF
+                        print(f"⚠️ Failed to register font, using Helvetica: {e}")
+            else:
+                if self.verbose:
+                    print("⚠️ No CJK font found, using Helvetica (may not display some characters correctly)")
+
+            # Get dimensions from the first image
+            first_image = cv2.imread(image_paths[0])
+            if first_image is None:
+                if self.verbose:
+                    print(f"❌ Could not read image: {image_paths[0]}")
+                return None
+
+            img_height, img_width = first_image.shape[:2]
+
+            # Create PDF with consistent page size
+            c = canvas.Canvas(output_pdf, pagesize=(img_width, img_height))
+
+            for i, (image_path, ocr_result) in enumerate(zip(image_paths, ocr_results)):
+                if self.verbose:
+                    print(f"📄 Adding page {i+1} to PDF...")
+
+                # Compress and add the image as background
+                img = Image.open(image_path)
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+                img_buffer = io.BytesIO()
+                img.save(img_buffer, format='JPEG', quality=self.image_quality, optimize=True)
+                img_buffer.seek(0)
+                c.drawImage(ImageReader(img_buffer), 0, 0, width=img_width, height=img_height)
+
+                # Add invisible text layers
+                if ocr_result and ocr_result.get('rec_texts'):
+                    for text, score, box in zip(ocr_result['rec_texts'], ocr_result['rec_scores'], ocr_result['rec_boxes']):
+                        if text.strip():
+                            try:
+                                x1, y1, x2, y2 = box[:4]
+                                pdf_x = x1
+                                pdf_y = img_height - y2
+                                text_height = y2 - y1
+                                font_size = max(8, min(text_height * 0.8, 48))
+                                c.setFillColorRGB(0, 0, 0, alpha=0)
+                                c.setFont(font_name, font_size)
+                                c.drawString(pdf_x, pdf_y, text)
+                            except Exception as e:
+                                if self.verbose:
+                                    print(f"⚠️ Error adding text '{text}': {e}")
+                else:
+                    if self.verbose:
+                        print(f"⚠️ No text found for page {i+1}")
+
+                c.showPage()
+
             c.save()
-            
+
             if self.verbose:
                 print(f"✅ Searchable PDF saved as: {output_pdf}")
-            
+
             return output_pdf
-            
+
         except Exception as e:
             if self.verbose:
                 print(f"❌ Error creating searchable PDF: {e}")
@@ -384,3 +467,212 @@ class OCRProcessor:
             results['boxed_image'] = self.draw_bounding_boxes(image_path, ocr_result, boxed_image_path)
 
         return results
+
+    def process_pdf(self, pdf_path: str, output_prefix: str, bounding_boxes: bool, dpi: int = 300, workers: int = 1) -> Optional[List[Dict[str, Any]]]:
+        """
+        Perform OCR on a PDF file.
+
+        Args:
+            pdf_path (str): Path to the PDF file
+            output_prefix (str): Prefix for output files
+            bounding_boxes (bool): Whether to generate bounding box images
+            dpi (int): Resolution for PDF to image conversion
+            workers (int): Number of parallel workers for OCR (default: 1)
+
+        Returns:
+            List[Dict[str, Any]]: A list of OCR results for each page
+        """
+        if not os.path.exists(pdf_path):
+            if self.verbose:
+                print(f"❌ PDF file not found: {pdf_path}")
+            return None
+
+        try:
+            if self.verbose:
+                print(f"🔄 Converting PDF to images at {dpi} DPI...")
+
+            images = convert_from_path(pdf_path, dpi=dpi)
+
+            if not images:
+                if self.verbose:
+                    print("❌ Could not convert PDF to images")
+                return None
+
+            if self.verbose:
+                print(f"🖼️ PDF converted to {len(images)} pages")
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save all images first
+                image_paths = []
+                for i, image in enumerate(images):
+                    page_num = i + 1
+                    temp_image_path = self.save_temp_image(image, temp_dir, page_num)
+                    image_paths.append(temp_image_path)
+
+                # Process pages (parallel or sequential)
+                if workers > 1 and len(images) > 1:
+                    all_results = self._process_pages_parallel(image_paths, workers)
+                else:
+                    all_results = self._process_pages_sequential(image_paths)
+                
+                if not all_results or not any(all_results):
+                    if self.verbose:
+                        print("❌ No OCR results found in any page")
+                    return None
+
+                # Generate searchable PDF
+                pdf_output_path = f"{output_prefix}_searchable.pdf"
+                self.create_searchable_pdf(image_paths, all_results, pdf_output_path)
+
+                # Generate bounding box images
+                if bounding_boxes:
+                    for i, (img_path, res) in enumerate(zip(image_paths, all_results)):
+                        page_num = i + 1
+                        if res:
+                            box_path = f"{output_prefix}_page_{page_num}_with_boxes.jpg"
+                            self.draw_bounding_boxes(img_path, res, box_path)
+                        else:
+                            if self.verbose:
+                                print(f"⏭️  Skipping bounding boxes for blank page {page_num}")
+
+            return all_results
+
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ Error processing PDF: {e}")
+            return None
+
+    def _process_pages_sequential(self, image_paths: List[str]) -> List[Optional[Dict[str, Any]]]:
+        """Process pages sequentially."""
+        all_results = []
+        for i, image_path in enumerate(image_paths):
+            page_num = i + 1
+            if self.verbose:
+                print(f"🔍 Processing page {page_num}/{len(image_paths)}...")
+            ocr_result = self.process_image(image_path)
+            if ocr_result:
+                all_results.append(ocr_result)
+            else:
+                all_results.append(None)
+                if self.verbose:
+                    print(f"⚠️ No OCR results for page {page_num}")
+        return all_results
+
+    def _process_pages_parallel(self, image_paths: List[str], workers: int) -> List[Optional[Dict[str, Any]]]:
+        """Process pages in parallel using ThreadPoolExecutor."""
+        if self.verbose:
+            print(f"⚡ Processing {len(image_paths)} pages with {workers} workers...")
+
+        # Results indexed by page number
+        results = [None] * len(image_paths)
+
+        def process_page(args):
+            idx, image_path = args
+            return idx, self.process_image(image_path)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_page, (i, path)): i for i, path in enumerate(image_paths)}
+            completed = 0
+            for future in as_completed(futures):
+                idx, ocr_result = future.result()
+                results[idx] = ocr_result
+                completed += 1
+                if self.verbose:
+                    status = "✓" if ocr_result else "⚠️ no text"
+                    print(f"🔍 Page {idx + 1}/{len(image_paths)} done ({status}) [{completed}/{len(image_paths)}]")
+
+        return results
+
+    def save_temp_image(self, image: Image.Image, temp_dir: str, page_num: int) -> str:
+        """
+        Save a PIL image to a temporary directory as PNG for lossless OCR input.
+
+        Args:
+            image (Image.Image): The PIL image to save
+            temp_dir (str): The temporary directory path
+            page_num (int): The page number, used for the filename
+
+        Returns:
+            str: The path to the saved temporary image
+        """
+        temp_image_path = os.path.join(temp_dir, f"page_{page_num}.png")
+        image.save(temp_image_path, "PNG")
+        return temp_image_path
+
+    def compress_pdf_ghostscript(self, input_pdf: str, output_pdf: str = None,
+                                  preset: str = "ebook") -> Optional[str]:
+        """
+        Compress a PDF file using Ghostscript.
+
+        Args:
+            input_pdf (str): Path to the input PDF file
+            output_pdf (str, optional): Path for the output PDF. If None, replaces the input.
+            preset (str): Compression preset. Options:
+                - "screen": 72 dpi, lowest quality, smallest size
+                - "ebook": 150 dpi, medium quality (default)
+                - "printer": 300 dpi, high quality
+                - "prepress": 300 dpi, highest quality
+
+        Returns:
+            str: Path to the compressed PDF, or None if failed
+        """
+        # Check if Ghostscript is available
+        gs_cmd = shutil.which("gs")
+        if not gs_cmd:
+            if self.verbose:
+                print("⚠️ Ghostscript (gs) not found. Install with: sudo pacman -S ghostscript")
+            return None
+
+        valid_presets = ["screen", "ebook", "printer", "prepress"]
+        if preset not in valid_presets:
+            if self.verbose:
+                print(f"⚠️ Invalid preset '{preset}'. Using 'ebook'. Valid: {valid_presets}")
+            preset = "ebook"
+
+        # If no output specified, compress in-place using temp file
+        replace_original = output_pdf is None
+        if replace_original:
+            output_pdf = input_pdf + ".tmp"
+
+        try:
+            if self.verbose:
+                print(f"🗜️  Compressing PDF with Ghostscript ({preset} preset)...")
+
+            cmd = [
+                "gs",
+                "-sDEVICE=pdfwrite",
+                "-dCompatibilityLevel=1.4",
+                f"-dPDFSETTINGS=/{preset}",
+                "-dNOPAUSE",
+                "-dQUIET",
+                "-dBATCH",
+                f"-sOutputFile={output_pdf}",
+                input_pdf
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                if self.verbose:
+                    print(f"❌ Ghostscript error: {result.stderr}")
+                return None
+
+            # Replace original if needed
+            if replace_original:
+                os.replace(output_pdf, input_pdf)
+                output_pdf = input_pdf
+
+            # Report size reduction
+            if self.verbose:
+                original_size = os.path.getsize(input_pdf if not replace_original else output_pdf)
+                print(f"✅ Compressed PDF saved: {output_pdf} ({original_size / 1024 / 1024:.2f} MB)")
+
+            return output_pdf
+
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ Error during Ghostscript compression: {e}")
+            # Clean up temp file if it exists
+            if replace_original and os.path.exists(output_pdf):
+                os.remove(output_pdf)
+            return None

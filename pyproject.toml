@@ -35,6 +35,7 @@ dependencies = [
     "reportlab>=4.0.0",
     "opencv-python>=4.0.0",
     "pillow>=8.0.0",
+    "pdf2image>=1.16.0",
 ]
 
 [project.optional-dependencies]
